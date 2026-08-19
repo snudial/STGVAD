@@ -1,97 +1,133 @@
-# STGVAD — Spatio-Temporal Graph Vessel Anomaly Detection
+<div align="center">
 
-AIS(Automatic Identification System) 선박 항적 데이터를 **시공간 그래프**로 변환하고,
-GNN + 시퀀스 모델(LSTM / Transformer) 조합으로 **항로(route) 단위 이상 탐지**를 수행하는 실험 코드입니다.
+# ⛴️ STGVAD: Spatio-Temporal Graph-Based <br> Vessel Behavior Anomaly Detection
 
-정답 라벨이 없는 실데이터를 다루기 위해, 물리적으로 그럴듯한 **이상치를 합성 주입**해
-라벨을 만들고 그 위에서 모델을 비교합니다.
+[![Paper on IEEE Access](https://img.shields.io/badge/Paper-IEEE%20Access-00629B?logo=ieee&logoColor=white)](https://ieeexplore.ieee.org/document/11165046)
 
----
+</div>
 
-## 파이프라인
+
+## News
+
+- **2026**: Our paper is published in **IEEE Access**, vol. 14, pp. 2152–2165. 🎉
+
+
+## Overview
+
+Spatio-Temporal GNNs usually assume fixed spatial anchors such as sensors or road segments.
+The open sea has no such anchors, so STGVAD builds the graph differently: **every timestamped
+vessel state becomes a node**, and a unified multi-ship trajectory graph is formed by linking
+temporally adjacent nodes and by grouping spatially proximate vessels with **OPTICS** clustering.
+
+Because real AIS data carries no anomaly labels, this repository also synthesizes labels by
+injecting physically grounded kinematic anomalies (excess acceleration and turn rate) into a
+controlled fraction of trajectories.
+
+
+## Features
+
+- **Cluster**: hourly OPTICS clustering over `(LAT, LON)`, producing one graph per vessel cluster
+- **Inject**: route-level synthetic anomaly injection with controllable route / node ratios
+- **Train**: 10 registered models — LSTM, Transformer, MLP, GAT, and GNN+sequence hybrids
+- **Aggregate**: multi-seed mean ± std aggregation and cross-model comparison tables
+- **Plot**: F1-score curves over anomaly ratios
+
+
+## Pipeline
 
 ```
 AIS CSV (OMTAD)
-   │  data/loader.py          1시간 간격 리샘플링·보간, COURSE → (sin, cos)
+   │  data/loader.py            1-hour resampling & interpolation, COURSE → (sin, cos)
    ▼
-시각별 OPTICS 클러스터링
-   │  cluster/optics.py       매 시각 t 의 (LAT, LON) 으로 선박을 군집화
-   │  graph/builder.py        t 직전 h=10 시간 구간을 잘라 클러스터당 k=3개 항적 샘플링
+Hourly OPTICS clustering
+   │  cluster/optics.py         cluster vessels by (LAT, LON) at each target hour t
+   │  graph/builder.py          take the preceding h=10 hours, sample k=3 tracks per cluster
    ▼
-클러스터 그래프  (3 tracks × 10 nodes = 노드 30개)
-   │                          storage/nx_graphs_original.pkl
+Cluster graph  (3 tracks × 10 nodes = 30 nodes)
+   │                            storage/nx_graphs_original.pkl
    ▼
-이상치 주입
-   │  graph/inject_anomaly.py 항적을 route 단위로 분리 → 일부 route의 연속 구간에
-   │                          가속도·선회율 이상(μ + 3.5σ)을 주입 → 다시 클러스터로 병합
+Anomaly injection
+   │  graph/inject_anomaly.py   split into per-route subgraphs → inject acceleration /
+   │                            turn-rate anomalies (μ + 3.5σ) over a contiguous node block
+   │                            → regroup into cluster graphs
    ▼
-주입 그래프  storage/nx_graphs_injected/nx_graphs_injected_r={route}_n={node}.pkl
-   │  graph/convert.py        PyTorch Geometric `Data` 로 변환
+Injected graphs  storage/nx_graphs_injected/nx_graphs_injected_r={route}_n={node}.pkl
+   │  graph/convert.py          build edges, convert to PyTorch Geometric `Data`
    ▼
-학습 / 평가  scripts/train.py → results/{model}/r{route}_n{node}/
+Train / evaluate  scripts/train.py → results/{model}/r{route}_n{node}/
 ```
 
-**노드 특징 (5차원)**: `LON, LAT, SPEED, COURSE_SIN, COURSE_COS`
+**Node features (5-dim)**: `LON, LAT, SPEED, COURSE_SIN, COURSE_COS`
 
-**엣지 구성** (`graph/convert.py:create_cluster_edges`)
-- 같은 항적 내: 과거 → 미래 방향으로 fully connected
-- 다른 항적 간: 노드 `i` → 상대 항적의 노드 `k` (`k ≥ i`), 즉 미래 정보 누수 없음
+**Edge construction** (`graph/convert.py:create_cluster_edges`)
+- Within a track: past → future, fully connected
+- Across tracks: node `i` → node `k` of another track with `k ≥ i`, so no future information leaks
 
-**라벨 (`y`, 3차원)**: 각 항적이 이상인지 여부. 한 항적 안에서 이상 노드가
-`block_size = 10 × node_ratio` 개 이상 **연속**으로 나타나면 1.
+**Label (`y`, 3-dim)**: one binary label per track. A track is anomalous when at least
+`block_size = 10 × node_ratio` of its nodes are anomalous **consecutively**.
 
-**주입 비율 두 가지**
-| 인자 | 의미 |
-| --- | --- |
-| `route_ratio` | 전체 항적 중 이상으로 만들 비율 (0.1 / 0.3 / 0.5) |
-| `node_ratio` | 한 항적 안에서 이상으로 만들 연속 노드 비율 (0.3 / 0.5 / 0.7) |
+**Injection ratios**
 
----
+| Argument | Meaning | Values used in the paper |
+| --- | --- | --- |
+| `route_ratio` | fraction of trajectories turned anomalous | 0.1 / 0.3 / 0.5 |
+| `node_ratio` | fraction of consecutive nodes made anomalous inside one trajectory | 0.3 / 0.5 / 0.7 |
 
-## Setup
 
-### 1. 저장소 클론
+## Installation
+
+### Prerequisites
+
+- Python 3.10+
+- CUDA-capable GPU (recommended for training)
+- ~21 GB of free disk space for the generated graph pickles
+
+### Setup
 
 ```bash
+# Clone repository
 git clone https://github.com/snudial/STGVAD.git
 cd STGVAD
-```
 
-### 2. Python 환경
+# Create virtual environment (recommended)
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-Python 3.10 이상을 권장합니다.
-
-```bash
-python -m venv .venv && source .venv/bin/activate   # 또는 conda create -n stgvad python=3.10
-
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-> **PyTorch / PyG 설치 주의**
-> `requirements.txt` 는 CUDA 12.4 + `torch==2.6.0` 기준입니다.
-> 다른 CUDA 버전을 쓴다면 torch 와 torch_geometric 은 공식 안내에 맞춰 따로 설치하세요.
+> **PyTorch / PyG note**
+> `requirements.txt` pins `torch==2.6.0` built for CUDA 12.4. For a different CUDA
+> version, install torch and torch_geometric separately:
 >
 > ```bash
 > pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 > pip install torch_geometric==2.6.1
 > ```
 
-### 3. 데이터셋 준비
 
-AIS 원본은 공개 데이터셋 **OMTAD (Open Maritime Traffic Analysis Dataset)** 를 사용하며,
-용량이 커서 이 저장소에는 포함하지 않습니다.
+## Quick Start
+
+All commands are run from the repository root. The `Makefile` sets `PYTHONPATH` for you;
+run `make help` to list every target.
+
+### 1. Prepare Data
+
+AIS tracks come from the public **OMTAD (Open Maritime Traffic Analysis Dataset)**, which is
+not bundled here because of its size.
 
 ```bash
 git clone https://github.com/EdithCowan/OMTAD.git data/OMTAD
 ```
 
-기본 경로는 `data/OMTAD/West Grid` 이고, 다른 곳에 두었다면 환경변수로 지정합니다.
+The default root is `data/OMTAD/West Grid`. Point elsewhere with an environment variable:
 
 ```bash
 export OMTAD_ROOT="/path/to/OMTAD/West Grid"
 ```
 
-기대하는 디렉터리 구조:
+Expected layout:
 
 ```
 data/OMTAD/West Grid/
@@ -103,171 +139,186 @@ data/OMTAD/West Grid/
 └── 2020/
 ```
 
-사용 연도는 `pipeline/generation_runner.py` 의 `year_list` 에서 바꿀 수 있습니다 (기본 2018–2020).
+Years are configured by `year_list` in `pipeline/generation_runner.py` (2018–2020 by default).
 
-### 4. 디스크 공간
-
-그래프 pickle 이 매우 큽니다. 실행 전에 여유 공간을 확인하세요.
-
-| 산출물 | 크기 |
-| --- | --- |
-| `storage/nx_graphs_original.pkl` | 약 0.8 GB |
-| `storage/nx_graphs_injected/*.pkl` (조합당) | 약 2.3 GB |
-| 9개 조합 전부 생성 시 | **약 21 GB** |
-
----
-
-## 실행
-
-모든 명령은 저장소 루트에서 실행합니다. `Makefile` 이 `PYTHONPATH` 를 잡아 줍니다.
-`make help` 로 전체 명령을 볼 수 있습니다.
-
-### 1. 원본 그래프 생성 (최초 1회)
+### 2. Build the Original Graphs (run once)
 
 ```bash
 make cluster
 ```
-→ `storage/nx_graphs_original.pkl`
+→ `storage/nx_graphs_original.pkl` (~0.8 GB)
 
-### 2. 이상치 주입
+### 3. Inject Anomalies
 
 ```bash
-make inject route=0.5 node=0.5   # 한 조합만
-make inject_all                  # route 3종 × node 3종 = 9개 조합 전부
+make inject route=0.5 node=0.5   # one combination (~2.3 GB each)
+make inject_all                  # all 3 × 3 = 9 combinations (~21 GB total)
 ```
 → `storage/nx_graphs_injected/nx_graphs_injected_r=0.5_n=0.5.pkl`
 
-### 3. 학습
+### 4. Train
 
-단일 실행:
+Single run:
 
 ```bash
 make train model=lstm_gcn route=0.5 node=0.5 seed=42
 CUDA_VISIBLE_DEVICES=1 make train model=lstm_gcn route=0.5 node=0.5 seed=42
 ```
 
-한 모델의 전체 조합(9조합 × 5시드 = 45회)을 순차 실행하고 자동 집계까지:
+Full sweep for one model (9 ratio combinations × 5 seeds), aggregation included:
 
 ```bash
 make run model=lstm_gcn gpu=0
-# 또는 직접
+# equivalently
 bash scripts/run_experiments.sh lstm_gcn 0
 ```
 
-시드·비율은 환경변수로 덮어쓸 수 있습니다.
+Seeds and ratios can be overridden through environment variables:
 
 ```bash
 SEEDS="42" ROUTE_RATIOS="0.5" NODE_RATIOS="0.5" bash scripts/run_experiments.sh lstm 0
 ```
 
-### 4. 결과 집계 / 시각화
+### 5. Aggregate and Plot
 
 ```bash
-make tables                                  # 모델 × 조합 비교표 생성 → final_results/
+make tables                                  # cross-model comparison tables → final_results/
 python tools/plot_f1_curves.py --save_dir figures
 ```
 
----
 
-## 사용 가능한 모델
+## Models
 
-`--model` 에 넣는 이름입니다.
+Names accepted by `--model`:
 
-| 이름 | 구조 |
+| Name | Architecture |
 | --- | --- |
-| `mlp` | 항적별 flatten MLP (그래프 미사용 baseline) |
-| `lstm` | 항적별 LSTM (그래프 미사용 baseline) |
-| `transformer` | 항적별 Transformer encoder (그래프 미사용 baseline) |
-| `gat` | GAT 2층 + mean pooling |
-| `lstm_gcn`, `lstm_gat`, `lstm_sage` | GNN 2층 (+residual) → 항적별 LSTM |
-| `transformer_gcn`, `transformer_gat`, `transformer_sage` | GNN 2층 (+residual) → 항적별 Transformer |
+| `mlp` | per-track flattened MLP (graph-free baseline) |
+| `lstm` | per-track LSTM (graph-free baseline) |
+| `transformer` | per-track Transformer encoder (graph-free baseline) |
+| `gat` | 2-layer GAT + mean pooling |
+| `lstm_gcn`, `lstm_gat`, `lstm_sage` | 2-layer GNN (+residual) → per-track LSTM |
+| `transformer_gcn`, `transformer_gat`, `transformer_sage` | 2-layer GNN (+residual) → per-track Transformer |
 
-모든 모델은 `(x, edge_index, batch)` 를 받아 `[B, 3]` 확률을 반환합니다 (항적 A/B/C 각각의 이상 확률).
+Every model takes `(x, edge_index, batch)` and returns a `[B, 3]` tensor of per-track
+anomaly probabilities.
 
-### 새 모델 추가하기
+### Adding a New Model
 
-1. `models/my_model.py` 에 `torch.nn.Module` 을 작성하고 `@register_model("my_model")` 을 붙입니다.
-2. `models/__init__.py` 에 import 를 한 줄 추가합니다 (레지스트리 등록 시점 확보).
-3. 바로 실행됩니다.
+1. Write a `torch.nn.Module` in `models/my_model.py` and decorate it with `@register_model("my_model")`.
+2. Add one import line to `models/__init__.py` so the decorator runs.
+3. Run it:
 
 ```bash
 make run model=my_model gpu=0
 ```
 
-`models/registry.py` 는 `__init__` 시그니처를 검사해 필요한 인자만 골라 넘기므로,
-모델이 쓰지 않는 하이퍼파라미터는 무시됩니다. 이름에 `_` 가 있으면
-(`lstm_gcn` → `gnn_type="gcn"`) 뒷부분이 `gnn_type` 으로 자동 주입됩니다.
+`models/registry.py` inspects `__init__` and forwards only the arguments your model declares,
+so unused hyperparameters are ignored. If the name contains `_`, the suffix is injected as
+`gnn_type` (`lstm_gcn` → `gnn_type="gcn"`).
 
----
 
-## 결과 형식
+## Data Format
 
-학습 산출물은 `.gitignore` 처리되어 저장소에는 포함되지 않습니다.
+### Input (AIS CSV)
+
+| Column | Description |
+| --- | --- |
+| `CRAFT_ID` | vessel identifier |
+| `Track_ID` | trajectory identifier |
+| `LON`, `LAT` | coordinates |
+| `SPEED` | speed over ground |
+| `COURSE` | course over ground (degrees) |
+| `TIMESTAMP` | datetime |
+
+### Output (Results)
+
+Training artifacts are gitignored and stay local.
 
 ```
 results/{model}/r{route}_n{node}/
-├── results_seed_2.csv        # 시드별 테스트 지표 (Metric, Value)
+├── results_seed_2.csv        # per-seed test metrics (Metric, Value)
 ├── results_seed_12.csv
 ├── ...
-├── best_model_s2.pt          # early stopping 체크포인트
-└── aggregated_results.csv    # 시드 평균 ± 표준편차
+├── best_model_s2.pt          # early-stopping checkpoint
+└── aggregated_results.csv    # mean ± std across seeds
 
 final_results/
-├── F1_score_comparison.csv   # 행=모델, 열=r{route}_n{node}
+├── F1_score_comparison.csv   # rows = models, columns = r{route}_n{node}
 ├── AUC_ROC_comparison.csv
 ├── ...
 └── best_results_summary.csv
 ```
 
-기록되는 지표: `Accuracy`, `Precision`, `Recall`, `F1-score`, `Precision@100`,
-`BalancedAcc`, `MCC`, `AUC-ROC`, `PR-AUC` (`train_utils/evaluate.py`).
+Reported metrics: `Accuracy`, `Precision`, `Recall`, `F1-score`, `Precision@100`,
+`BalancedAcc`, `MCC`, `AUC-ROC`, `PR-AUC` (see `train_utils/evaluate.py`).
 
-학습 설정: Adam(lr=1e-3), BCELoss, batch 64, 최대 30 epoch,
-validation loss 기준 early stopping(patience=5), split 7:1.5:1.5.
+Training setup: Adam (lr=1e-3), BCELoss, batch size 64, up to 30 epochs,
+early stopping on validation loss (patience=5), 7:1.5:1.5 train/val/test split.
 
----
 
-## 디렉터리 구조
+## Project Structure
 
 ```
-.
+STGVAD/
 ├── data/
-│   └── loader.py                    # AIS CSV 로드, 1시간 리샘플링·보간
+│   └── loader.py                    # AIS CSV loading, 1-hour resampling & interpolation
 ├── cluster/
-│   └── optics.py                    # 시각별 OPTICS 군집화
+│   └── optics.py                    # hourly OPTICS clustering
 ├── graph/
-│   ├── builder.py                   # 클러스터 → NetworkX 시간 그래프
-│   ├── inject_anomaly.py            # route 단위 이상치 주입
-│   ├── convert.py                   # 엣지 구성 + PyG Data 변환, 라벨 생성
-│   └── io.py                        # pickle 저장/로드
+│   ├── builder.py                   # cluster → NetworkX temporal graph
+│   ├── inject_anomaly.py            # route-level anomaly injection
+│   ├── convert.py                   # edge construction, PyG Data conversion, labeling
+│   └── io.py                        # pickle save / load
 ├── models/
-│   ├── registry.py                  # @register_model 레지스트리, get_model()
+│   ├── registry.py                  # @register_model registry, get_model()
 │   ├── mlp_classifier.py
 │   ├── lstm.py / transformer.py
 │   ├── gat_classifier.py
 │   └── gnn_lstm.py / gnn_transformer.py
 ├── train_utils/
 │   ├── early_stopping.py
-│   ├── evaluate.py                  # 9개 지표 계산
+│   ├── evaluate.py                  # 9 evaluation metrics
 │   └── random_seed.py
 ├── pipeline/
-│   ├── generation_runner.py         # 로드 → 군집화 → 그래프 생성
-│   └── injection_runner.py          # 주입 / 로드 후 PyG 변환
+│   ├── generation_runner.py         # load → cluster → build graphs
+│   └── injection_runner.py          # inject / load and convert to PyG
 ├── scripts/
 │   ├── cluster_once.py              # make cluster
 │   ├── inject_graphs.py             # make inject
 │   ├── train.py                     # make train
-│   ├── aggregate_results.py         # 시드별 결과 → mean ± std
-│   └── run_experiments.sh           # make run (전체 조합 반복)
+│   ├── aggregate_results.py         # per-seed results → mean ± std
+│   └── run_experiments.sh           # make run (full sweep)
 ├── tools/
 │   ├── make_comparison_tables.py    # make tables
-│   └── plot_f1_curves.py            # F1 곡선 그림
+│   └── plot_f1_curves.py            # F1-score curves
 ├── Makefile
 └── requirements.txt
 ```
 
----
 
-## 참고
+## 📖 Citation
 
-- 데이터셋: [OMTAD — Open Maritime Traffic Analysis Dataset](https://github.com/EdithCowan/OMTAD)
+If you find this project useful, welcome to cite us.
+
+```bibtex
+@article{kim2026stgvad,
+  title={STGVAD: Spatio-Temporal Graph-Based Vessel Behavior Anomaly Detection},
+  author={Kim, Jeehong and Kim, Minchan and Hwang, Youngseok and Bae, Sungho and Cho, Deuk Jae and Lee, Wonhee and Park, Hyunwoo},
+  journal={IEEE Access},
+  volume={14},
+  pages={2152--2165},
+  year={2026},
+  doi={10.1109/ACCESS.2025.3609783}
+}
+```
+
+
+## Acknowledgements
+
+AIS tracks are taken from [OMTAD — Open Maritime Traffic Analysis Dataset](https://github.com/EdithCowan/OMTAD).
+
+
+## Contact
+
+For questions or issues, please open an issue on GitHub.
