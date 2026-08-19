@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# 데이터셋 (별도 저장소: https://github.com/EdithCowan/OMTAD)
+data/OMTAD/
+
+# 생성물: 그래프 pickle (수 GB)
+storage/
+*.pkl
+
+# 학습 결과 / 체크포인트 / 그림
+results/
+final_results/
+figures/
+*.pt
+
+# OS / 에디터
+.DS_Store
+.vscode/
+.idea/
